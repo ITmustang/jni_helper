@@ -7,9 +7,8 @@ from typing import Iterator, List
 
 # from androguard.core.analysis.analysis import Analysis
 
-from androguard.core.dex import ClassDefItem, EncodedMethod
-from androguard.decompiler.util import TYPE_DESCRIPTOR
-from androguard.core import dex as dx
+from androguard.core.bytecodes.dvm import ClassDefItem, EncodedMethod
+from androguard.core.bytecodes import dvm as dx
 
 from rich.console import Console
 from rich.progress import (
@@ -23,6 +22,60 @@ from rich.progress import (
 from io import BytesIO
 from elftools.elf.elffile import ELFFile
 from elftools.elf.sections import SymbolTableSection
+
+# --- Androguard 3.x compatibility shim (replaces androguard.decompiler.util.TYPE_DESCRIPTOR) ---
+# Primitive type map used in Dalvik descriptors
+TYPE_DESCRIPTOR = {
+    'V': 'void',
+    'Z': 'boolean',
+    'B': 'byte',
+    'S': 'short',
+    'C': 'char',
+    'I': 'int',
+    'J': 'long',
+    'F': 'float',
+    'D': 'double',
+}
+
+def _read_type(desc: str, i: int):
+    """Return (typename, next_index) for a single type starting at desc[i]."""
+    c = desc[i]
+    # Arrays
+    if c == '[':
+        t, j = _read_type(desc, i + 1)
+        return f"{t}[]", j
+    # Objects Ljava/lang/String;
+    if c == 'L':
+        j = desc.index(';', i)
+        name = desc[i + 1:j].replace('/', '.')
+        return name, j + 1
+    # Primitives
+    if c in TYPE_DESCRIPTOR:
+        return TYPE_DESCRIPTOR[c], i + 1
+    # Fallback
+    return f"unknown({c})", i + 1
+
+def parse_descriptor(proto: str):
+    """
+    Parse a Dalvik method descriptor like '(Ljava/lang/String;I)[B'
+    -> (['java.lang.String', 'int'], 'byte[]')
+    """
+    assert proto and proto[0] == '(', f"Bad descriptor: {proto}"
+    i = 1
+    args = []
+    while proto[i] != ')':
+        t, i = _read_type(proto, i)
+        args.append(t)
+    i += 1  # skip ')'
+    ret, i2 = _read_type(proto, i)
+    return args, ret
+
+def pretty_signature(class_name: str, method_name: str, proto: str):
+    """Return a human-readable signature using parse_descriptor()."""
+    args, ret = parse_descriptor(proto)
+    cn = class_name.strip('L;').replace('/', '.')
+    return f"{cn}->{method_name}({', '.join(args)}) : {ret}"
+# --- end shim ---
 
 DexFile = namedtuple("DexFile", ["name", "data"])
 SoFile = namedtuple("SoFile", ["name", "data"])
@@ -235,7 +288,7 @@ def parse_dex_proc(dex: DexFile):
     count = 0
     try:
         # Use dex.DEX to parse the DEX file
-        d = dx.DEX(dex.data)
+        d = dx.DalvikVMFormat(dex.data)
     except Exception as e:
         return dex, count, e
 
